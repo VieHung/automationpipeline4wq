@@ -4,6 +4,60 @@ import time
 import json
 
 
+def _safe_get_json(
+    s,
+    url: str,
+    max_retries: int = 8,
+    base_sleep: float = 0.8,
+    timeout: int = 30,
+):
+    """
+    GET json with retry for transient failures and HTTP 429 rate-limit.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            response = s.get(url, timeout=timeout)
+        except Exception:
+            if attempt == max_retries:
+                raise
+            time.sleep(min(base_sleep * (2 ** attempt), 20))
+            continue
+
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    sleep_seconds = float(retry_after)
+                except ValueError:
+                    sleep_seconds = min(base_sleep * (2 ** attempt), 20)
+            else:
+                sleep_seconds = min(base_sleep * (2 ** attempt), 20)
+
+            if attempt == max_retries:
+                raise RuntimeError(f"Rate limit exceeded for URL: {url}")
+            time.sleep(sleep_seconds)
+            continue
+
+        if 500 <= response.status_code < 600:
+            if attempt == max_retries:
+                response.raise_for_status()
+            time.sleep(min(base_sleep * (2 ** attempt), 20))
+            continue
+
+        if response.status_code // 100 != 2:
+            # Non-retryable errors like 400/401/403/404 should surface as-is
+            response.raise_for_status()
+
+        try:
+            return response.json()
+        except ValueError:
+            if attempt == max_retries:
+                raise RuntimeError(f"Invalid JSON response for URL: {url}")
+            time.sleep(min(base_sleep * (2 ** attempt), 20))
+
+    raise RuntimeError(f"Failed to fetch URL after retries: {url}")
+
+
 def make_clickable_alpha_id(alpha_id):
     """
     Make alpha_id clickable in dataframes
@@ -220,8 +274,8 @@ def get_datasets(
 ):
     url = "https://api.worldquantbrain.com/data-sets?" +\
         f"instrumentType={instrument_type}&region={region}&delay={str(delay)}&universe={universe}"
-    result = s.get(url)
-    datasets_df = pd.DataFrame(result.json()['results'])
+    payload = _safe_get_json(s, url)
+    datasets_df = pd.DataFrame(payload.get('results', []))
     return datasets_df
 
 
@@ -232,26 +286,42 @@ def get_datafields(
     delay: int = 1,
     universe: str = 'TOP3000',
     dataset_id: str = '',
-    search: str = ''
+    search: str = '',
+    page_size: int = 50,
+    request_pause: float = 0.25,
+    max_retries: int = 8,
 ):
     if len(search) == 0:
         url_template = "https://api.worldquantbrain.com/data-fields?" +\
             f"&instrumentType={instrument_type}" +\
-            f"&region={region}&delay={str(delay)}&universe={universe}&dataset.id={dataset_id}&limit=50" +\
+            f"&region={region}&delay={str(delay)}&universe={universe}&dataset.id={dataset_id}&limit={page_size}" +\
             "&offset={x}"
-        count = s.get(url_template.format(x=0)).json()['count'] 
     else:
         url_template = "https://api.worldquantbrain.com/data-fields?" +\
             f"&instrumentType={instrument_type}" +\
-            f"&region={region}&delay={str(delay)}&universe={universe}&limit=50" +\
+            f"&region={region}&delay={str(delay)}&universe={universe}&limit={page_size}" +\
             f"&search={search}" +\
             "&offset={x}"
-        count = 100
+
+    first_payload = _safe_get_json(
+        s,
+        url_template.format(x=0),
+        max_retries=max_retries,
+    )
+    count = int(first_payload.get('count', 0))
     
     datafields_list = []
-    for x in range(0, count, 50):
-        datafields = s.get(url_template.format(x=x))
-        datafields_list.append(datafields.json()['results'])
+    datafields_list.append(first_payload.get('results', []))
+
+    for x in range(page_size, count, page_size):
+        if request_pause > 0:
+            time.sleep(request_pause)
+        payload = _safe_get_json(
+            s,
+            url_template.format(x=x),
+            max_retries=max_retries,
+        )
+        datafields_list.append(payload.get('results', []))
 
     datafields_list_flat = [item for sublist in datafields_list for item in sublist]
 

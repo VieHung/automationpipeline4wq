@@ -573,137 +573,378 @@ def main():
     s = start_session()
 
     k = [
+    "rank(book_value / (close * shares))",
  
-    # ── 1–10: SHORT-TERM MEAN REVERSION ─────────────────────────────────────
-    # Logic: Overreaction in price & vwap tends to revert within 1–5 days
-    "-rank(ts_delta(close, 1))",
-    "-rank(ts_av_diff(close, 5))",
-    "-rank(ts_zscore(close, 10))",
-    "-rank(ts_zscore(returns, 5))",
-    "-rank(ts_delta(vwap, 3))",
-    "-rank(ts_av_diff(vwap, 5))",
-    "-rank(ts_delta(close, 3))",
-    "rank(ts_delay(close, 1) - close)",
-    "-rank(ts_av_diff(close, 10))",
-    "-rank(ts_rank(returns, 5) - 0.5)",
+    # 2. Inverse P/B: low price-to-book is value
+    "-rank(close / (book_value_per_share_reported_value + 0.0001))",
  
-    # ── 11–20: MEDIUM-TERM PRICE MOMENTUM ───────────────────────────────────
-    # Logic: Trend continuation over 10–20 days
-    "rank(ts_mean(returns, 10))",
-    "rank(ts_delta(close, 10))",
-    "rank(close / ts_delay(close, 10) - 1)",
-    "rank(ts_mean(returns, 15))",
-    "rank(ts_delta(vwap, 10))",
-    "rank(ts_mean(close, 5) / ts_mean(close, 20) - 1)",
-    "rank(ts_sum(returns, 10))",
-    "rank(ts_decay_linear(returns, 10))",
-    "rank(ts_rank(close, 20))",
-    "rank(ts_delta(ts_rank(close, 10), 5))",
+    # 3. B/M within SUBINDUSTRY (boosts signal after neutralization)
+    "group_neutralize(rank(book_value_per_share_reported_value / (close + 0.0001)), subindustry)",
  
-    # ── 21–30: VOLUME–PRICE DIVERGENCE ──────────────────────────────────────
-    # Logic: Unusually high volume on down days / low volume on up days = reversal signal
-    "-rank(ts_corr(close, volume, 10))",
-    "rank(sign(ts_delta(close, 1)) * rank(1 / (volume / ts_mean(volume, 20) + 0.001)))",
-    "rank(ts_sum(returns * volume, 10) / ts_sum(volume, 10))",
-    "-rank(ts_corr(vwap, volume, 5))",
-    "rank(log(volume) - ts_mean(log(volume), 20))",
-    "rank(ts_delta(volume, 5))",
-    "rank(ts_mean(volume, 5) / ts_mean(volume, 20))",
-    "-rank(ts_corr(volume, close, 20))",
-    "rank(ts_sum(volume * abs(returns), 10))",
-    "rank(ts_rank(volume, 20) - ts_rank(close, 20))",
+    # 4. Time-series momentum on B/M ratio
+    "rank(ts_delta(book_value_per_share_reported_value / (close + 0.0001), 60))",
  
-    # ── 31–40: VOLATILITY SIGNALS ────────────────────────────────────────────
-    # Logic: Low vol stocks tend to outperform (low-vol anomaly); vol clustering
-    "-rank(ts_std_dev(returns, 10))",
-    "-rank(ts_std_dev(returns, 20))",
-    "rank(ts_std_dev(returns, 20) - ts_std_dev(returns, 5))",
-    "-rank(ts_std_dev(close, 10) / ts_mean(close, 10))",
-    "rank(ts_delta(ts_std_dev(returns, 10), 5))",
-    "-rank(ts_mean(abs(returns), 10))",
-    "-rank(ts_std_dev(volume, 10))",
-    "rank(abs(ts_delta(close, 1)) / (ts_std_dev(close, 20) + 0.0001))",
-    "-rank(ts_std_dev(high - low, 10))",
-    "rank(ts_std_dev(returns, 20) / (ts_std_dev(returns, 5) + 0.0001) - 1)",
+    # 5. B/M ranked over past year (relative to own history)
+    "rank(ts_rank(book_value_per_share_reported_value / (close + 0.0001), 252))",
  
-    # ── 41–50: INTRADAY PRICE STRUCTURE ──────────────────────────────────────
-    # Logic: Where price closes relative to day's range encodes information
-    "rank(close - open)",
-    "rank((close - low) / (high - low + 0.0001))",
-    "rank(close - vwap)",
-    "rank(vwap - open)",
-    "rank((2 * close - high - low) / (high - low + 0.0001))",
-    "rank(close - (high + low) / 2)",
-    "rank(open - ts_delay(close, 1))",
-    "rank(high - close)",
-    "-rank(high - close)",
-    "rank(ts_mean(close - open, 10))",
+    # 6. B/M z-score — how far from its own historical mean
+    "rank(ts_zscore(book_value_per_share_reported_value / (close + 0.0001), 252))",
  
-    # ── 51–60: TIME-SERIES RANK MOMENTUM ────────────────────────────────────
-    # Logic: Relative historical ranking captures trend persistence
-    "rank(ts_rank(close, 20) - ts_rank(close, 5))",
-    "rank(ts_rank(vwap, 20))",
-    "rank(ts_rank(volume, 20))",
-    "rank(ts_delta(ts_rank(close, 20), 5))",
-    "rank(ts_rank(returns, 20) - ts_rank(returns, 5))",
-    "-rank(ts_arg_max(close, 20))",
-    "rank(20 - ts_arg_max(close, 20))",
-    "rank(ts_arg_min(close, 20))",
-    "rank(ts_rank(high - low, 20))",
-    "rank(ts_rank(close, 10) - ts_rank(vwap, 10))",
+    # 7. Group rank of B/M within subindustry
+    "group_rank(book_value_per_share_reported_value / (close + 0.0001), subindustry)",
  
-    # ── 61–70: CROSS-SECTIONAL WITHIN SUBINDUSTRY ───────────────────────────
-    # Logic: Rank within group amplifies signal after SUBINDUSTRY neutralization
-    "group_neutralize(rank(ts_mean(returns, 10)), subindustry)",
-    "group_neutralize(rank(ts_delta(close, 5)), subindustry)",
-    "group_neutralize(-rank(ts_std_dev(returns, 20)), subindustry)",
-    "group_rank(ts_delta(volume, 10), subindustry)",
-    "group_rank(ts_mean(returns, 5), subindustry)",
-    "group_rank(close / ts_delay(close, 10) - 1, subindustry)",
-    "group_neutralize(rank(close - open), subindustry)",
-    "group_neutralize(rank(volume / ts_mean(volume, 20)), subindustry)",
-    "group_rank(ts_corr(close, volume, 10), subindustry)",
-    "group_neutralize(rank(-ts_std_dev(returns, 10)), subindustry)",
+    # 8. Combined: buy high B/M + selling when P/B increasing (momentum reversal)
+    "rank(book_value_per_share_reported_value / (close  + 0.0001)) - rank(ts_delta(close / (book_value_per_share_reported_value + 0.0001), 60))",
  
-    # ── 71–80: COMPOSITE MULTI-FACTOR ────────────────────────────────────────
-    # Logic: Multiply orthogonal signals to boost SR
-    "rank(ts_mean(returns, 5)) * rank(volume / ts_mean(volume, 10))",
-    "rank(ts_delta(close, 5)) * rank(1 / (ts_std_dev(returns, 10) + 0.0001))",
-    "sign(ts_delta(close, 5)) * rank(1 / (ts_std_dev(returns, 20) + 0.0001))",
-    "rank(ts_corr(close, volume, 5)) * rank(ts_delta(close, 5))",
-    "rank(ts_rank(close, 20)) - rank(ts_rank(volume, 20))",
-    "rank(ts_sum(returns, 5)) * rank(-ts_std_dev(returns, 10))",
-    "rank(close / ts_mean(close, 20)) * rank(volume / ts_mean(volume, 20))",
-    "rank(ts_decay_linear(returns, 5)) * rank(-ts_std_dev(returns, 10))",
-    "rank(ts_mean(returns, 10)) - rank(ts_std_dev(returns, 10))",
-    "rank(ts_delta(vwap, 5)) * rank(volume / ts_mean(volume, 20))",
+    # 9. Smoothed B/M to remove noise (20-day average)
+    "rank(ts_mean(book_value_per_share_reported_value (close + 0.0001), 20))",
  
-    # ── 81–90: Z-SCORE / NORMALIZATION BASED ────────────────────────────────
-    # Logic: Z-score transforms reduce outlier impact and normalize distributions
-    "zscore(ts_mean(returns, 10) / (ts_std_dev(returns, 20) + 0.0001))",
-    "rank(ts_zscore(close, 20)) * rank(volume / ts_mean(volume, 10))",
-    "-rank(ts_zscore(returns, 5))",
-    "rank(ts_corr(returns, volume, 10)) * rank(ts_mean(returns, 5))",
-    "rank(ts_delta(ts_rank(close, 20), 5))",
-    "-rank(ts_decay_linear(ts_std_dev(returns, 5), 10))",
-    "rank(ts_zscore(vwap, 20)) * rank(-ts_std_dev(returns, 10))",
-    "-rank(ts_zscore(volume, 10))",
-    "rank(ts_zscore(close - open, 10))",
-    "rank(ts_corr(close, ts_delay(close, 5), 20))",
+    # 10. B/M changes: companies growing book value faster than price
+    "rank(ts_delta(book_value_per_share_reported_value, 252) / (ts_delay(book_value_per_share_reported_value, 252) + 0.0001) - ts_delta(close , 252) / (ts_delay(close , 252) + 0.0001))",
  
-    # ── 91–100: PRICE RANGE & SPREAD ─────────────────────────────────────────
-    # Logic: High-low range, vwap deviation encode institutional activity
-    "rank(vwap - ts_mean(vwap, 10))",
-    "rank(ts_sum(close - open, 10))",
-    "rank(ts_mean(high - low, 10))",
-    "-rank(ts_mean(high - close, 5))",
-    "rank(ts_mean((close - low) / (high - low + 0.0001), 10))",
-    "rank(ts_delta(high, 5) - ts_delta(low, 5))",
-    "rank(ts_mean(abs(close - vwap), 10))",
-    "rank(ts_corr(high - low, volume, 10))",
-    "rank(close - ts_mean(close, 10)) * rank(volume / ts_mean(volume, 5))",
-    "rank(ts_sum((close > open), 10) / 10 - 0.5)",
-]
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 2 — EARNINGS YIELD / E/P / EPS (Paper Rank #14, #16)
+    # Theory: High earnings relative to price = undervalued + quality
+    # Paper: EPS and E/P rank 14th and 16th in importance
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 11. Earnings yield = E/P (inverse of P/E)
+    "rank(eps / (close + 0.0001))",
+ 
+    # 12. Within-subindustry earnings yield
+    "group_neutralize(rank(eps / (close + 0.0001)), subindustry)",
+ 
+    # 13. EPS time-series momentum (rising earnings)
+    "rank(ts_delta(eps, 60))",
+ 
+    # 14. EPS relative to its own history
+    "rank(ts_rank(eps, 252))",
+ 
+    # 15. Smoothed earnings yield to reduce quarterly noise
+    "rank(ts_mean(eps, 60) / (close + 0.0001))",
+ 
+    # 16. Earnings acceleration: change in earnings growth rate
+    "rank(ts_delta(ts_delta(eps, 20), 20))",
+ 
+    # 17. EPS zscore — standardized relative to history
+    "rank(ts_zscore(eps, 252))",
+ 
+    # 18. P/E compression (P/E ratio shrinking = becoming cheaper over time)
+    "-rank(ts_delta(close / (eps + 0.0001), 60))",
+ 
+    # 19. Earnings yield group rank within subindustry
+    "group_rank(eps / (close + 0.0001), subindustry)",
+ 
+    # 20. Earnings yield combined with earnings trend
+    "rank(eps / (close + 0.0001)) * sign(ts_delta(eps, 60))",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 3 — PRICE-TO-SALES / P/S RATIO (Paper Rank #5 — MOST IMPORTANT RATIO)
+    # Theory: Low P/S stocks have been the single most predictive ratio in Iran market
+    # Consistent with global findings: revenue yield predicts returns
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 21. Revenue yield (inverse P/S): more revenue per dollar of market cap
+    "rank(revenue / (close * shares + 0.0001))",
+ 
+    # 22. Negative P/S: lower is better (value)
+    "-rank(close * shares / (revenue + 0.0001))",
+ 
+    # 23. Revenue yield within subindustry
+    "group_neutralize(-rank(close * shares / (revenue + 0.0001)), subindustry)",
+ 
+    # 24. Revenue growth momentum (top-line acceleration)
+    "rank(ts_delta(revenue, 252) / (abs(ts_delay(revenue, 252)) + 0.0001))",
+ 
+    # 25. Smoothed revenue yield
+    "rank(ts_mean(revenue, 60) / (close * shares + 0.0001))",
+ 
+    # 26. P/S ratio ts_rank (relative to own history)
+    "-rank(ts_rank(close * shares / (revenue + 0.0001), 252))",
+ 
+    # 27. Revenue yield group rank
+    "group_rank(revenue / (close * shares + 0.0001), subindustry)",
+ 
+    # 28. Revenue yield z-score
+    "rank(ts_zscore(revenue / (close * shares + 0.0001), 252))",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 4 — RETURN ON ASSETS / PROFITABILITY (Paper Rank #6, #13, #15)
+    # Theory: ROA, OROA, GPM — profitability quality factor
+    # Paper: These 3 metrics together capture operational efficiency
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 29. ROA: net income / assets
+    "rank(net_income_adjusted / (total_assets + 0.0001))",
+ 
+    # 30. OROA: operating income / assets (cleaner than ROA)
+    "rank(operating_income / (total_assets + 0.0001))",
+ 
+    # 31. GPM: gross profit margin (high = pricing power)
+    "rank(gross_profit / (revenue + 0.0001))",
+ 
+    # 32. ROA within subindustry (compensates for SUBINDUSTRY neutralization)
+    "group_neutralize(rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+ 
+    # 33. GPM within subindustry
+    "group_neutralize(rank(gross_profit / (revenue + 0.0001)), subindustry)",
+ 
+    # 34. ROA momentum: improving profitability
+    "rank(ts_delta(net_income_adjusted / (total_assets + 0.0001), 60))",
+ 
+    # 35. Smoothed ROA to reduce quarterly noise
+    "rank(ts_mean(net_income_adjusted / (total_assets + 0.0001), 60))",
+ 
+    # 36. ROA relative to own history
+    "rank(ts_rank(net_income_adjusted / (total_assets + 0.0001), 252))",
+ 
+    # 37. ROA z-score
+    "rank(ts_zscore(net_income_adjusted / (total_assets + 0.0001), 252))",
+ 
+    # 38. Gross profit to assets (Novy-Marx quality factor)
+    "rank(gross_profit / (total_assets + 0.0001))",
+ 
+    # 39. OROA group rank
+    "group_rank(operating_income / (total_assets + 0.0001), subindustry)",
+ 
+    # 40. GPM z-score over time
+    "rank(ts_zscore(gross_profit / (revenue + 0.0001), 252))",
+ 
+    # 41. Operating income growth (OROA change)
+    "rank(ts_delta(operating_income / (total_assets + 0.0001), 60))",
+ 
+    # 42. Gross profit margin trend
+    "rank(ts_delta(gross_profit / (revenue + 0.0001), 60))",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 5 — EFFICIENCY RATIOS: ITR & WCTR (Paper Rank #7, #18)
+    # Theory: High inventory turnover = operational efficiency + demand strength
+    # WCTR captures working capital efficiency
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 43. Inventory Turnover Ratio (ITR): revenue / inventory
+    "rank(revenue / (inventory + 0.0001))",
+ 
+    # 44. Working Capital Turnover (WCTR): revenue / working_capital
+    "rank(revenue / (working_capital + 0.0001))",
+ 
+    # 45. ITR within subindustry
+    "group_neutralize(rank(revenue / (inventory + 0.0001)), subindustry)",
+ 
+    # 46. WCTR within subindustry
+    "group_neutralize(rank(revenue / (working_capital + 0.0001)), subindustry)",
+ 
+    # 47. ITR momentum
+    "rank(ts_delta(revenue / (inventory + 0.0001), 60))",
+ 
+    # 48. Asset Turnover Ratio (related efficiency metric)
+    "rank(revenue / (total_assets + 0.0001))",
+ 
+    # 49. ITR z-score
+    "rank(ts_zscore(revenue / (inventory + 0.0001), 252))",
+ 
+    # 50. ITR group rank
+    "group_rank(revenue / (inventory + 0.0001), subindustry)",
+ 
+    # 51. WCTR momentum
+    "rank(ts_delta(revenue / (working_capital + 0.0001), 60))",
+ 
+    # 52. Smoothed ITR
+    "rank(ts_mean(revenue / (inventory + 0.0001), 60))",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 6 — MARKET CAP / SIZE (Paper Rank #11)
+    # Theory: Small-cap premium (Fama-French) — smaller MC = higher expected returns
+    # Paper: MC is a significant predictor in both directions
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 53. Small-cap premium: buy small
+    "-rank(close * shares)",
+ 
+    # 54. Market cap change (momentum: growing caps are winning stocks)
+    "rank(ts_delta(close * shares, 20))",
+ 
+    # 55. Relative size rank within subindustry (bet against giants)
+    "group_rank(-close * shares, subindustry)",
+ 
+    # 56. Log market cap (smoother size signal)
+    "-rank(log(close * shares + 1))",
+ 
+    # 57. Market cap z-score
+    "-rank(ts_zscore(close * shares, 252))",
+ 
+    # 58. Small cap within group: smallest in subindustry
+    "group_neutralize(-rank(close * shares), subindustry)",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 7 — PRICE-TO-CASH-FLOW (Paper Rank #17)
+    # Theory: P/CF is cleaner than P/E (harder to manipulate)
+    # Operating cash flow quality signal
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 59. Cash flow yield: operating CF / market cap
+    "rank(operating_cashflow_reported_value / (close * shares + 0.0001))",
+ 
+    # 60. Negative P/CF: low P/CF = value
+    "-rank(close * shares / (operating_cf + 0.0001))",
+ 
+    # 61. CF yield within subindustry
+    "group_neutralize(rank(operating_cf / (close * shares + 0.0001)), subindustry)",
+ 
+    # 62. Cash flow momentum
+    "rank(ts_delta(operating_cf, 60))",
+ 
+    # 63. Cash flow yield z-score
+    "rank(ts_zscore(operating_cf / (close * shares + 0.0001), 252))",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 8 — NET INCOME GROWTH (Paper Rank #19: NIGR)
+    # Theory: Earnings growth predicts future returns — momentum in fundamentals
+    # Paper: NIGR ranked 19th, growth category has mild but real impact
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 64. Year-over-year net income growth
+    "rank(ts_delta(net_income_adjusted, 252) / (abs(ts_delay(net_income_adjusted, 252)) + 0.0001))",
+ 
+    # 65. Relative earnings growth vs own history
+    "rank(ts_rank(ts_delta(net_income_adjusted, 60), 252))",
+ 
+    # 66. EPS growth momentum (smoothed)
+    "rank(ts_mean(ts_delta(eps, 60), 120))",
+ 
+    # 67. Earnings growth within subindustry
+    "group_neutralize(rank(ts_delta(net_income_adjusted, 252) / (abs(net_income_adjusted) + 0.0001)), subindustry)",
+ 
+    # 68. Revenue growth (top-line + bottom-line combo)
+    "rank(ts_delta(revenue, 252) / (abs(ts_delay(revenue, 252)) + 0.0001))",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 9 — MULTI-FACTOR COMPOSITES (XGBoost-Inspired Non-linear Combos)
+    # Theory: Paper shows XGBoost (non-linear combos) beats single-factor models
+    # Strategy: multiply or add orthogonal signals → diversified alpha
+    # Combinations follow paper's feature importance hierarchy:
+    #   market_value × profitability × efficiency
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 69. ROA × B/M (profitability + value — Piotroski-like)
+    "rank(net_income_adjusted / (total_assets + 0.0001)) * rank(book_value / (close * shares + 0.0001))",
+ 
+    # 70. Earnings yield × Revenue yield (double value)
+    "rank(eps / (close + 0.0001)) * rank(revenue / (close * shares + 0.0001))",
+ 
+    # 71. GPM × ROA (two profitability signals — margins + asset productivity)
+    "rank(gross_profit / (revenue + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001))",
+ 
+    # 72. ITR × ROA (efficiency + profitability: operationally excellent firms)
+    "rank(revenue / (inventory + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001))",
+ 
+    # 73. Quality minus price (ROA – P/S): cheap AND profitable
+    "rank(net_income_adjusted / (total_assets + 0.0001)) - rank(close * shares / (revenue + 0.0001))",
+ 
+    # 74. OROA × Revenue yield
+    "rank(operating_income / (total_assets + 0.0001)) * rank(revenue / (close * shares + 0.0001))",
+ 
+    # 75. B/M × GPM (cheap + high margins = quality value)
+    "rank(book_value / (close * shares + 0.0001)) * rank(gross_profit / (revenue + 0.0001))",
+ 
+    # 76. Cash flow yield × ROA (cash quality + profitability)
+    "rank(operating_cf / (close * shares + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001))",
+ 
+    # 77. Gross profit to assets × Revenue yield (Novy-Marx + value)
+    "rank(gross_profit / (total_assets + 0.0001)) * rank(revenue / (close * shares + 0.0001))",
+ 
+    # 78. Triple composite: E/P + CF/P + ROA (Fama-French quality)
+    "rank(eps / (close + 0.0001)) + rank(operating_cf / (close * shares + 0.0001)) + rank(net_income_adjusted / (total_assets + 0.0001))",
+ 
+    # 79. Efficiency composite: ITR + WCTR (operational speed)
+    "rank(revenue / (inventory + 0.0001)) + rank(revenue / (working_capital + 0.0001))",
+ 
+    # 80. GPM – P/E (quality discount signal: good margins but cheap)
+    "rank(gross_profit / (revenue + 0.0001)) - rank(close / (eps + 0.0001))",
+ 
+    # 81. B/M × E/P × ITR (value × earnings yield × efficiency — 3-factor)
+    "rank(book_value / (close * shares + 0.0001)) * rank(eps / (close + 0.0001)) * rank(revenue / (inventory + 0.0001))",
+ 
+    # 82. Earnings growth × GPM (growing earnings in high-margin companies)
+    "rank(ts_delta(net_income_adjusted, 252) / (abs(net_income_adjusted) + 0.0001)) * rank(gross_profit / (revenue + 0.0001))",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 10 — CROSS-SECTIONAL GROUP COMPOSITES (SUBINDUSTRY-Aware)
+    # Theory: Paper uses SUBINDUSTRY neutralization — group operators maximize
+    # what survives after neutralization. group_neutralize already does it.
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 83. Quality composite within subindustry
+    "group_neutralize(rank(eps / (close + 0.0001)) + rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+ 
+    # 84. Value × quality within subindustry
+    "group_neutralize(rank(book_value / (close * shares + 0.0001)) * rank(gross_profit / (revenue + 0.0001)), subindustry)",
+ 
+    # 85. Cash quality within subindustry
+    "group_neutralize(rank(operating_cf / (close * shares + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+ 
+    # 86. Efficiency × profitability within subindustry
+    "group_neutralize(rank(revenue / (inventory + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+ 
+    # 87. Combined quality rank within group
+    "group_rank(net_income_adjusted / (total_assets + 0.0001) + gross_profit / (revenue + 0.0001), subindustry)",
+ 
+    # 88. EPS group rank (earnings per share relative to peers)
+    "group_rank(eps / (close + 0.0001), subindustry)",
+ 
+    # 89. Cash flow yield group rank
+    "group_rank(operating_cf / (close * shares + 0.0001), subindustry)",
+ 
+    # 90. B/M group rank
+    "group_rank(book_value / (close * shares + 0.0001), subindustry)",
+ 
+    # 91. Earnings history rank within subindustry
+    "group_neutralize(rank(ts_rank(eps, 252)), subindustry)",
+ 
+    # 92. Revenue yield within subindustry
+    "group_neutralize(-rank(close * shares / (revenue + 0.0001)), subindustry)",
+ 
+ 
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK 11 — TIME-SERIES RANKS ON FUNDAMENTALS (Relative to Own History)
+    # Theory: Fundamental improvement relative to own history = positive signal
+    # Paper: Gradient boosting captures non-linear temporal patterns in ratios
+    # ═══════════════════════════════════════════════════════════════════════
+ 
+    # 93. ROA vs own trailing year
+    "rank(ts_rank(net_income_adjusted / (total_assets + 0.0001), 252))",
+ 
+    # 94. Earnings yield vs own trailing year
+    "rank(ts_rank(eps / (close + 0.0001), 252))",
+ 
+    # 95. Earnings yield acceleration (change in ts_rank over 2 months)
+    "rank(ts_delta(ts_rank(eps, 252), 60))",
+ 
+    # 96. GPM vs own history
+    "rank(ts_rank(gross_profit / (revenue + 0.0001), 252))",
+ 
+    # 97. B/M vs own history
+    "rank(ts_rank(book_value / (close * shares + 0.0001), 252))",
+ 
+    # 98. Cash flow yield vs own history
+    "rank(ts_rank(operating_cf / (close * shares + 0.0001), 252))",
+ 
+    # 99. ITR vs own trailing year
+    "rank(ts_rank(revenue / (inventory + 0.0001), 252))",
+ 
+    # 100. ROA acceleration: is profitability improvement speeding up?
+    "rank(ts_delta(ts_rank(net_income_adjusted / (total_assets + 0.0001), 252), 60))",
+    ]
+
     alpha_list = [generate_alpha(x) for x in k]
 
     simulate_alpha_list(s, alpha_list)

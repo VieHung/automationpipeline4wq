@@ -1,0 +1,15 @@
+﻿dataset_id,expected_count_api,collected_rows,ok
+analyst4,653,653,True
+fundamental2,318,318,True
+fundamental6,886,886,True
+model16,24,24,True
+model51,16,16,True
+news12,322,322,True
+news18,75,75,True
+option8,64,64,True
+option9,74,74,True
+pv1,23,23,True
+pv13,165,165,True
+socialmedia12,18,18,True
+socialmedia8,2,2,True
+univ1,5,5,True
