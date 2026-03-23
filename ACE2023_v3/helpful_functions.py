@@ -326,4 +326,15 @@ def get_datafields(
     datafields_list_flat = [item for sublist in datafields_list for item in sublist]
 
     datafields_df = pd.DataFrame(datafields_list_flat)
+
+    # Compatibility columns for downstream scripts
+    if not datafields_df.empty:
+        if 'id' in datafields_df.columns and 'field_id' not in datafields_df.columns:
+            datafields_df['field_id'] = datafields_df['id']
+
+        if 'dataset' in datafields_df.columns and 'dataset_id' not in datafields_df.columns:
+            datafields_df['dataset_id'] = datafields_df['dataset'].apply(
+                lambda x: x.get('id') if isinstance(x, dict) else None
+            )
+
     return datafields_df

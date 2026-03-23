@@ -6,6 +6,7 @@ import time
 import json
 import os
 import getpass
+import random
 from pathlib import Path
 
 import pandas as pd
@@ -112,10 +113,10 @@ def check_session_timeout(s):
 def generate_alpha(
     regular: str,
     region: str = "USA",
-    universe: str = "TOP3000",
-    neutralization: str = "SUBINDUSTRY",
+    universe: str = "TOP500",
+    neutralization: str = "NONE",
     delay: int = 1,
-    decay: int = 4,
+    decay: int = 2,
     truncation: float = 0.08,
     nan_handling: str = "OFF",
     unit_handling: str = "VERIFY",
@@ -392,6 +393,8 @@ def get_simulation_result_json(s, alpha_id):
 def simulate_single_alpha(
     s,
     simulate_data,
+    pre_request_delay: float = 0.0,
+    pre_request_jitter: float = 0.0,
 ):
     """
     To simulate single alpha
@@ -399,6 +402,13 @@ def simulate_single_alpha(
     
     if check_session_timeout(s) < 1000:
         s = start_session()
+
+    # Stagger requests from concurrent workers to avoid burst traffic / 429
+    sleep_seconds = max(0.0, pre_request_delay)
+    if pre_request_jitter > 0:
+        sleep_seconds += random.uniform(0, pre_request_jitter)
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
 
     simulate_response = start_simulation(s, simulate_data)
     simulation_result = simulation_progress(s, simulate_response)
@@ -412,6 +422,8 @@ def simulate_single_alpha(
 def simulate_multi_alpha(
     s,
     simulate_data_list,
+    pre_request_delay: float = 0.0,
+    pre_request_jitter: float = 0.0,
 ):
     """
     To simulate single alpha
@@ -419,8 +431,23 @@ def simulate_multi_alpha(
     
     if check_session_timeout(s) < 1000:
         s = start_session()
+
+    # Stagger requests from concurrent workers to avoid burst traffic / 429
+    sleep_seconds = max(0.0, pre_request_delay)
+    if pre_request_jitter > 0:
+        sleep_seconds += random.uniform(0, pre_request_jitter)
+    if sleep_seconds > 0:
+        time.sleep(sleep_seconds)
+
     if len(simulate_data_list) == 1:
-        return [simulate_single_alpha(s, simulate_data_list[0])]
+        return [
+            simulate_single_alpha(
+                s,
+                simulate_data_list[0],
+                pre_request_delay=pre_request_delay,
+                pre_request_jitter=pre_request_jitter,
+            )
+        ]
     simulate_response = start_simulation(s, simulate_data_list)
     simulation_result = multisimulation_progress(s, simulate_response)
     
@@ -502,6 +529,8 @@ def simulate_alpha_list(
     alpha_list,
     limit_of_concurrent_simulations=3,
     simulation_config=DEFAULT_CONFIG,
+    pre_request_delay: float = 0.0,
+    pre_request_jitter: float = 0.0,
 ):
     result_list = []
 
@@ -510,7 +539,13 @@ def simulate_alpha_list(
         with tqdm.tqdm(total=len(alpha_list)) as pbar:
             
             for result in pool.imap_unordered(
-                partial(simulate_single_alpha, s), alpha_list
+                partial(
+                    simulate_single_alpha,
+                    s,
+                    pre_request_delay=pre_request_delay,
+                    pre_request_jitter=pre_request_jitter,
+                ),
+                alpha_list,
             ):
                 result_list.append(result)
                 pbar.update()
@@ -532,13 +567,21 @@ def simulate_alpha_list_multi(
     limit_of_concurrent_simulations=3,
     limit_of_multi_simulations=3,
     simulation_config=DEFAULT_CONFIG,
+    pre_request_delay: float = 0.0,
+    pre_request_jitter: float = 0.0,
 ):
     if (limit_of_multi_simulations<2) or (limit_of_multi_simulations>10):
         print('Warning, limit of multi-simulation should be 2..10')
         limit_of_multi_simulations = 3
     if len(alpha_list)<10:
         print('Warning, list of alphas too short, single concurrent simulations will be used instead of multisimulations')
-        return simulate_alpha_list(s, alpha_list, simulation_config=simulation_config)
+        return simulate_alpha_list(
+            s,
+            alpha_list,
+            simulation_config=simulation_config,
+            pre_request_delay=pre_request_delay,
+            pre_request_jitter=pre_request_jitter,
+        )
     
     tasks = [alpha_list[i:i + limit_of_multi_simulations] for i in range(0, len(alpha_list), limit_of_multi_simulations)]
     result_list = []
@@ -548,7 +591,13 @@ def simulate_alpha_list_multi(
         with tqdm.tqdm(total=len(tasks)) as pbar:
                 
             for result in pool.imap_unordered(
-                partial(simulate_multi_alpha, s), tasks
+                partial(
+                    simulate_multi_alpha,
+                    s,
+                    pre_request_delay=pre_request_delay,
+                    pre_request_jitter=pre_request_jitter,
+                ),
+                tasks,
             ):
                 result_list.append(result)
                 pbar.update()
@@ -573,381 +622,376 @@ def main():
     s = start_session()
 
     k = [
-    "rank(book_value / (close * shares))",
+        # 1. B/M ratio: high = cheap vs book value
+    "rank(bookvalue_ps / (close + 0.0001))",
  
-    # 2. Inverse P/B: low price-to-book is value
-    "-rank(close / (book_value_per_share_reported_value + 0.0001))",
+    # 2. Inverse P/B (same signal, different form)
+    "-rank(close / (bookvalue_ps + 0.0001))",
  
-    # 3. B/M within SUBINDUSTRY (boosts signal after neutralization)
-    "group_neutralize(rank(book_value_per_share_reported_value / (close + 0.0001)), subindustry)",
+    # 3. B/M within SUBINDUSTRY group
+    "group_neutralize(rank(bookvalue_ps / (close + 0.0001)), subindustry)",
  
-    # 4. Time-series momentum on B/M ratio
-    "rank(ts_delta(book_value_per_share_reported_value / (close + 0.0001), 60))",
+    # 4. P/B momentum reversal: P/B rising fast → future underperformance
+    "-rank(ts_delta(close / (bookvalue_ps + 0.0001), 60))",
  
-    # 5. B/M ranked over past year (relative to own history)
-    "rank(ts_rank(book_value_per_share_reported_value / (close + 0.0001), 252))",
+    # 5. P/B ts_rank: relatively expensive vs own history
+    "-rank(ts_rank(close / (bookvalue_ps + 0.0001), 252))",
  
-    # 6. B/M z-score — how far from its own historical mean
-    "rank(ts_zscore(book_value_per_share_reported_value / (close + 0.0001), 252))",
+    # 6. P/B z-score vs own 1-year history
+    "-rank(ts_zscore(close / (bookvalue_ps + 0.0001), 252))",
  
-    # 7. Group rank of B/M within subindustry
-    "group_rank(book_value_per_share_reported_value / (close + 0.0001), subindustry)",
+    # 7. B/M group rank within subindustry (cheapest-in-group signal)
+    "group_rank(bookvalue_ps / (close + 0.0001), subindustry)",
  
-    # 8. Combined: buy high B/M + selling when P/B increasing (momentum reversal)
-    "rank(book_value_per_share_reported_value / (close  + 0.0001)) - rank(ts_delta(close / (book_value_per_share_reported_value + 0.0001), 60))",
+    # 8. Value + no recent price rally: B/M high AND price flat
+    "rank(bookvalue_ps / (close + 0.0001)) - rank(ts_delta(close, 60))",
  
-    # 9. Smoothed B/M to remove noise (20-day average)
-    "rank(ts_mean(book_value_per_share_reported_value (close + 0.0001), 20))",
+    # 9. Smoothed B/M (20-day average to cut noise from stale book data)
+    "rank(ts_mean(bookvalue_ps / (close + 0.0001), 20))",
  
-    # 10. B/M changes: companies growing book value faster than price
-    "rank(ts_delta(book_value_per_share_reported_value, 252) / (ts_delay(book_value_per_share_reported_value, 252) + 0.0001) - ts_delta(close , 252) / (ts_delay(close , 252) + 0.0001))",
+    # 10. Equity / cap: total equity relative to market cap
+    "rank(equity / (cap + 0.0001))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 2 — EARNINGS YIELD / E/P / EPS (Paper Rank #14, #16)
-    # Theory: High earnings relative to price = undervalued + quality
-    # Paper: EPS and E/P rank 14th and 16th in importance
+    # BLOCK 2  ▸  EARNINGS YIELD / E/P / EPS  (Paper Rank #14 & #16)
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 11. Earnings yield = E/P (inverse of P/E)
+    # 11. Earnings yield = E/P
     "rank(eps / (close + 0.0001))",
  
-    # 12. Within-subindustry earnings yield
-    "group_neutralize(rank(eps / (close + 0.0001)), subindustry)",
+    # 12. Negative P/E (lower = cheaper)
+    "-rank(close / (eps + 0.0001))",
  
-    # 13. EPS time-series momentum (rising earnings)
+    # 13. EPS time-series momentum (improving earnings)
     "rank(ts_delta(eps, 60))",
  
-    # 14. EPS relative to its own history
+    # 14. EPS ts_rank vs own history
     "rank(ts_rank(eps, 252))",
  
-    # 15. Smoothed earnings yield to reduce quarterly noise
-    "rank(ts_mean(eps, 60) / (close + 0.0001))",
+    # 15. Smoothed earnings yield to reduce quarterly jump noise
+    "rank(ts_mean(eps / (close + 0.0001), 60))",
  
-    # 16. Earnings acceleration: change in earnings growth rate
+    # 16. EPS acceleration: second derivative of earnings
     "rank(ts_delta(ts_delta(eps, 20), 20))",
  
-    # 17. EPS zscore — standardized relative to history
+    # 17. EPS z-score: how far current EPS is from 1-year average
     "rank(ts_zscore(eps, 252))",
  
-    # 18. P/E compression (P/E ratio shrinking = becoming cheaper over time)
+    # 18. P/E compression: P/E shrinking means stock getting cheaper
     "-rank(ts_delta(close / (eps + 0.0001), 60))",
  
     # 19. Earnings yield group rank within subindustry
     "group_rank(eps / (close + 0.0001), subindustry)",
  
-    # 20. Earnings yield combined with earnings trend
+    # 20. Earnings yield × positive EPS trend (quality filter)
     "rank(eps / (close + 0.0001)) * sign(ts_delta(eps, 60))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 3 — PRICE-TO-SALES / P/S RATIO (Paper Rank #5 — MOST IMPORTANT RATIO)
-    # Theory: Low P/S stocks have been the single most predictive ratio in Iran market
-    # Consistent with global findings: revenue yield predicts returns
+    # BLOCK 3  ▸  PRICE-TO-SALES  (Paper Rank #5 — TOP RATIO)
+    # sales_ps = sales per share; P/S = close / sales_ps
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 21. Revenue yield (inverse P/S): more revenue per dollar of market cap
-    "rank(revenue / (close * shares + 0.0001))",
+    # 21. Revenue yield: sales_ps / close (high = cheap vs revenue)
+    "rank(sales_ps / (close + 0.0001))",
  
-    # 22. Negative P/S: lower is better (value)
-    "-rank(close * shares / (revenue + 0.0001))",
+    # 22. Negative P/S (lower P/S = more value)
+    "-rank(close / (sales_ps + 0.0001))",
  
     # 23. Revenue yield within subindustry
-    "group_neutralize(-rank(close * shares / (revenue + 0.0001)), subindustry)",
+    "group_neutralize(-rank(close / (sales_ps + 0.0001)), subindustry)",
  
-    # 24. Revenue growth momentum (top-line acceleration)
+    # 24. Revenue growth: year-over-year sales growth rate
     "rank(ts_delta(revenue, 252) / (abs(ts_delay(revenue, 252)) + 0.0001))",
  
-    # 25. Smoothed revenue yield
-    "rank(ts_mean(revenue, 60) / (close * shares + 0.0001))",
+    # 25. Smoothed revenue yield (60-day)
+    "rank(ts_mean(sales_ps / (close + 0.0001), 60))",
  
-    # 26. P/S ratio ts_rank (relative to own history)
-    "-rank(ts_rank(close * shares / (revenue + 0.0001), 252))",
+    # 26. P/S ts_rank vs own history
+    "-rank(ts_rank(close / (sales_ps + 0.0001), 252))",
  
-    # 27. Revenue yield group rank
-    "group_rank(revenue / (close * shares + 0.0001), subindustry)",
+    # 27. Revenue yield group rank within subindustry
+    "group_rank(sales_ps / (close + 0.0001), subindustry)",
  
-    # 28. Revenue yield z-score
-    "rank(ts_zscore(revenue / (close * shares + 0.0001), 252))",
+    # 28. P/S z-score
+    "-rank(ts_zscore(close / (sales_ps + 0.0001), 252))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 4 — RETURN ON ASSETS / PROFITABILITY (Paper Rank #6, #13, #15)
-    # Theory: ROA, OROA, GPM — profitability quality factor
-    # Paper: These 3 metrics together capture operational efficiency
+    # BLOCK 4  ▸  ROA / OROA / GPM — Profitability  (Paper Rank #6, #13, #15)
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 29. ROA: net income / assets
-    "rank(net_income_adjusted / (total_assets + 0.0001))",
+    # 29. ROA: net_income / total_assets
+    "rank(net_income_adjusted / (total_assets_reported_value + 0.0001))",
  
-    # 30. OROA: operating income / assets (cleaner than ROA)
-    "rank(operating_income / (total_assets + 0.0001))",
+    # 30. OROA: operating_income / total_assets
+    "rank(operating_income / (total_assets_reported_value + 0.0001))",
  
-    # 31. GPM: gross profit margin (high = pricing power)
-    "rank(gross_profit / (revenue + 0.0001))",
+    # 31. GPM: gross_income / revenue (gross profit margin)
+    "rank(gross_income_total / (revenue + 0.0001))",
  
-    # 32. ROA within subindustry (compensates for SUBINDUSTRY neutralization)
-    "group_neutralize(rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+    # 32. ROA within subindustry
+    "group_neutralize(rank(net_income_adjusted / (total_assets_reported_value + 0.0001)), subindustry)",
  
     # 33. GPM within subindustry
-    "group_neutralize(rank(gross_profit / (revenue + 0.0001)), subindustry)",
+    "group_neutralize(rank(gross_income_total / (revenue + 0.0001)), subindustry)",
  
-    # 34. ROA momentum: improving profitability
-    "rank(ts_delta(net_income_adjusted / (total_assets + 0.0001), 60))",
+    # 34. ROA improvement momentum
+    "rank(ts_delta(net_income_adjusted / (total_assets_reported_value + 0.0001), 60))",
  
-    # 35. Smoothed ROA to reduce quarterly noise
-    "rank(ts_mean(net_income_adjusted / (total_assets + 0.0001), 60))",
+    # 35. Smoothed ROA (60-day to bridge quarterly reporting gaps)
+    "rank(ts_mean(net_income_adjusted / (total_assets_reported_value + 0.0001), 60))",
  
-    # 36. ROA relative to own history
-    "rank(ts_rank(net_income_adjusted / (total_assets + 0.0001), 252))",
+    # 36. ROA ts_rank vs own history
+    "rank(ts_rank(net_income_adjusted / (total_assets_reported_value + 0.0001), 252))",
  
     # 37. ROA z-score
-    "rank(ts_zscore(net_income_adjusted / (total_assets + 0.0001), 252))",
+    "rank(ts_zscore(net_income_adjusted / (total_assets_reported_value + 0.0001), 252))",
  
-    # 38. Gross profit to assets (Novy-Marx quality factor)
-    "rank(gross_profit / (total_assets + 0.0001))",
+    # 38. Novy-Marx quality: gross_income / total_assets
+    "rank(gross_income_total / (total_assets_reported_value + 0.0001))",
  
-    # 39. OROA group rank
-    "group_rank(operating_income / (total_assets + 0.0001), subindustry)",
+    # 39. OROA group rank within subindustry
+    "group_rank(operating_income / (total_assets_reported_value + 0.0001), subindustry)",
  
-    # 40. GPM z-score over time
-    "rank(ts_zscore(gross_profit / (revenue + 0.0001), 252))",
+    # 40. GPM z-score
+    "rank(ts_zscore(gross_income_total / (revenue + 0.0001), 252))",
  
-    # 41. Operating income growth (OROA change)
-    "rank(ts_delta(operating_income / (total_assets + 0.0001), 60))",
+    # 41. OROA improvement trend
+    "rank(ts_delta(operating_income / (total_assets_reported_value + 0.0001), 60))",
  
-    # 42. Gross profit margin trend
-    "rank(ts_delta(gross_profit / (revenue + 0.0001), 60))",
+    # 42. GPM improvement trend
+    "rank(ts_delta(gross_income_total / (revenue + 0.0001), 60))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 5 — EFFICIENCY RATIOS: ITR & WCTR (Paper Rank #7, #18)
-    # Theory: High inventory turnover = operational efficiency + demand strength
-    # WCTR captures working capital efficiency
+    # BLOCK 5  ▸  EFFICIENCY: ITR & WCTR  (Paper Rank #7 & #18)
+    # inventory_turnover is pre-computed in BRAIN
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 43. Inventory Turnover Ratio (ITR): revenue / inventory
-    "rank(revenue / (inventory + 0.0001))",
+    # 43. ITR: pre-computed inventory turnover
+    "rank(inventory_turnover)",
  
-    # 44. Working Capital Turnover (WCTR): revenue / working_capital
+    # 44. WCTR: sales / working_capital
     "rank(revenue / (working_capital + 0.0001))",
  
     # 45. ITR within subindustry
-    "group_neutralize(rank(revenue / (inventory + 0.0001)), subindustry)",
+    "group_neutralize(rank(inventory_turnover), subindustry)",
  
     # 46. WCTR within subindustry
     "group_neutralize(rank(revenue / (working_capital + 0.0001)), subindustry)",
  
-    # 47. ITR momentum
-    "rank(ts_delta(revenue / (inventory + 0.0001), 60))",
+    # 47. ITR improvement momentum
+    "rank(ts_delta(inventory_turnover, 60))",
  
-    # 48. Asset Turnover Ratio (related efficiency metric)
-    "rank(revenue / (total_assets + 0.0001))",
+    # 48. Asset turnover: revenue / total_assets
+    "rank(revenue / (total_assets_reported_value + 0.0001))",
  
-    # 49. ITR z-score
-    "rank(ts_zscore(revenue / (inventory + 0.0001), 252))",
+    # 49. ITR z-score vs own history
+    "rank(ts_zscore(inventory_turnover, 252))",
  
     # 50. ITR group rank
-    "group_rank(revenue / (inventory + 0.0001), subindustry)",
+    "group_rank(inventory_turnover, subindustry)",
  
     # 51. WCTR momentum
     "rank(ts_delta(revenue / (working_capital + 0.0001), 60))",
  
     # 52. Smoothed ITR
-    "rank(ts_mean(revenue / (inventory + 0.0001), 60))",
+    "rank(ts_mean(inventory_turnover, 60))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 6 — MARKET CAP / SIZE (Paper Rank #11)
-    # Theory: Small-cap premium (Fama-French) — smaller MC = higher expected returns
-    # Paper: MC is a significant predictor in both directions
+    # BLOCK 6  ▸  MARKET CAP / SIZE  (Paper Rank #11)
+    # cap = market capitalization (confirmed field)
     # ═══════════════════════════════════════════════════════════════════════
  
     # 53. Small-cap premium: buy small
-    "-rank(close * shares)",
+    "-rank(cap)",
  
-    # 54. Market cap change (momentum: growing caps are winning stocks)
-    "rank(ts_delta(close * shares, 20))",
+    # 54. Market cap growth momentum (size expansion = winning)
+    "rank(ts_delta(cap, 20))",
  
-    # 55. Relative size rank within subindustry (bet against giants)
-    "group_rank(-close * shares, subindustry)",
+    # 55. Smallest-in-subindustry signal
+    "group_rank(-cap, subindustry)",
  
-    # 56. Log market cap (smoother size signal)
-    "-rank(log(close * shares + 1))",
+    # 56. Log market cap (smoother small-cap signal)
+    "-rank(log(cap + 1))",
  
-    # 57. Market cap z-score
-    "-rank(ts_zscore(close * shares, 252))",
+    # 57. Market cap z-score (relatively small vs own history)
+    "-rank(ts_zscore(cap, 252))",
  
-    # 58. Small cap within group: smallest in subindustry
-    "group_neutralize(-rank(close * shares), subindustry)",
+    # 58. Small cap neutralized within subindustry
+    "group_neutralize(-rank(cap), subindustry)",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 7 — PRICE-TO-CASH-FLOW (Paper Rank #17)
-    # Theory: P/CF is cleaner than P/E (harder to manipulate)
-    # Operating cash flow quality signal
+    # BLOCK 7  ▸  PRICE-TO-CASH-FLOW  (Paper Rank #17)
+    # CF/P = cash_flow_from_operations / cap
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 59. Cash flow yield: operating CF / market cap
-    "rank(operating_cashflow_reported_value / (close * shares + 0.0001))",
+    # 59. Cash flow yield: CF / market cap
+    "rank(cash_flow_from_operations / (cap + 0.0001))",
  
-    # 60. Negative P/CF: low P/CF = value
-    "-rank(close * shares / (operating_cf + 0.0001))",
+    # 60. Negative P/CF equivalent
+    "-rank(cap / (cash_flow_from_operations + 0.0001))",
  
     # 61. CF yield within subindustry
-    "group_neutralize(rank(operating_cf / (close * shares + 0.0001)), subindustry)",
+    "group_neutralize(rank(cash_flow_from_operations / (cap + 0.0001)), subindustry)",
  
-    # 62. Cash flow momentum
-    "rank(ts_delta(operating_cf, 60))",
+    # 62. Cash flow momentum: growing operating CF
+    "rank(ts_delta(cash_flow_from_operations, 60))",
  
-    # 63. Cash flow yield z-score
-    "rank(ts_zscore(operating_cf / (close * shares + 0.0001), 252))",
+    # 63. Free cash flow yield
+    "rank(free_cash_flow_total / (cap + 0.0001))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 8 — NET INCOME GROWTH (Paper Rank #19: NIGR)
-    # Theory: Earnings growth predicts future returns — momentum in fundamentals
-    # Paper: NIGR ranked 19th, growth category has mild but real impact
+    # BLOCK 8  ▸  NET INCOME GROWTH / NIGR  (Paper Rank #19)
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 64. Year-over-year net income growth
+    # 64. YoY net income growth rate
     "rank(ts_delta(net_income_adjusted, 252) / (abs(ts_delay(net_income_adjusted, 252)) + 0.0001))",
  
-    # 65. Relative earnings growth vs own history
+    # 65. Earnings growth relative to own history
     "rank(ts_rank(ts_delta(net_income_adjusted, 60), 252))",
  
-    # 66. EPS growth momentum (smoothed)
+    # 66. EPS growth momentum (smoothed 120-day)
     "rank(ts_mean(ts_delta(eps, 60), 120))",
  
     # 67. Earnings growth within subindustry
     "group_neutralize(rank(ts_delta(net_income_adjusted, 252) / (abs(net_income_adjusted) + 0.0001)), subindustry)",
  
-    # 68. Revenue growth (top-line + bottom-line combo)
-    "rank(ts_delta(revenue, 252) / (abs(ts_delay(revenue, 252)) + 0.0001))",
+    # 68. Revenue growth momentum
+    "rank(ts_delta(sales, 252) / (abs(ts_delay(sales, 252)) + 0.0001))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 9 — MULTI-FACTOR COMPOSITES (XGBoost-Inspired Non-linear Combos)
-    # Theory: Paper shows XGBoost (non-linear combos) beats single-factor models
-    # Strategy: multiply or add orthogonal signals → diversified alpha
-    # Combinations follow paper's feature importance hierarchy:
-    #   market_value × profitability × efficiency
+    # BLOCK 9  ▸  MULTI-FACTOR COMPOSITES  (XGBoost non-linear combos)
+    # Paper: XGBoost 83.5% accuracy via non-linear feature interactions
+    # Strategy: multiply orthogonal signals from paper's top features
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 69. ROA × B/M (profitability + value — Piotroski-like)
-    "rank(net_income_adjusted / (total_assets + 0.0001)) * rank(book_value / (close * shares + 0.0001))",
+    # 69. Value × Profitability: low P/B + high ROA (Piotroski F-score logic)
+    "rank(bookvalue_ps / (close + 0.0001)) * rank(net_income_adjusted / (total_assets_reported_value + 0.0001))",
  
-    # 70. Earnings yield × Revenue yield (double value)
-    "rank(eps / (close + 0.0001)) * rank(revenue / (close * shares + 0.0001))",
+    # 70. Double value: earnings yield × revenue yield
+    "rank(eps / (close + 0.0001)) * rank(sales_ps / (close + 0.0001))",
  
-    # 71. GPM × ROA (two profitability signals — margins + asset productivity)
-    "rank(gross_profit / (revenue + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001))",
+    # 71. Margin × Asset productivity (DuPont decomposition)
+    "rank(net_income_adjusted / (revenue + 0.0001)) * rank(revenue / (total_assets_reported_value + 0.0001))",
  
-    # 72. ITR × ROA (efficiency + profitability: operationally excellent firms)
-    "rank(revenue / (inventory + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001))",
+    # 72. Efficiency × Profitability: ITR × ROA
+    "rank(inventory_turnover) * rank(net_income_adjusted / (total_assets_reported_value + 0.0001))",
  
-    # 73. Quality minus price (ROA – P/S): cheap AND profitable
-    "rank(net_income_adjusted / (total_assets + 0.0001)) - rank(close * shares / (revenue + 0.0001))",
+    # 73. Quality minus Price: ROA minus P/S (want cheap AND profitable)
+    "rank(net_income_adjusted / (total_assets_reported_value + 0.0001)) - rank(close / (sales_ps + 0.0001))",
  
-    # 74. OROA × Revenue yield
-    "rank(operating_income / (total_assets + 0.0001)) * rank(revenue / (close * shares + 0.0001))",
+    # 74. Revenue yield × Operating margin
+    "rank(sales_ps / (close + 0.0001)) * rank(operating_income / (revenue + 0.0001))",
  
-    # 75. B/M × GPM (cheap + high margins = quality value)
-    "rank(book_value / (close * shares + 0.0001)) * rank(gross_profit / (revenue + 0.0001))",
+    # 75. B/M × GPM: cheap + high gross margin (value + quality)
+    "rank(bookvalue_ps / (close + 0.0001)) * rank(gross_income_total / (revenue + 0.0001))",
  
     # 76. Cash flow yield × ROA (cash quality + profitability)
-    "rank(operating_cf / (close * shares + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001))",
+    "rank(cash_flow_from_operations / (cap + 0.0001)) * rank(net_income_adjusted / (total_assets_reported_value + 0.0001))",
  
-    # 77. Gross profit to assets × Revenue yield (Novy-Marx + value)
-    "rank(gross_profit / (total_assets + 0.0001)) * rank(revenue / (close * shares + 0.0001))",
+    # 77. Gross profit/assets (Novy-Marx) × Revenue yield
+    "rank(gross_income_total / (total_assets_reported_value + 0.0001)) * rank(sales_ps / (close + 0.0001))",
  
-    # 78. Triple composite: E/P + CF/P + ROA (Fama-French quality)
-    "rank(eps / (close + 0.0001)) + rank(operating_cf / (close * shares + 0.0001)) + rank(net_income_adjusted / (total_assets + 0.0001))",
+    # 78. Triple factor: E/P + CF/P + ROA
+    "rank(eps / (close + 0.0001)) + rank(cash_flow_from_operations / (cap + 0.0001)) + rank(net_income_adjusted / (total_assets_reported_value + 0.0001))",
  
-    # 79. Efficiency composite: ITR + WCTR (operational speed)
-    "rank(revenue / (inventory + 0.0001)) + rank(revenue / (working_capital + 0.0001))",
+    # 79. Efficiency composite: ITR + WCTR
+    "rank(inventory_turnover) + rank(revenue / (working_capital + 0.0001))",
  
-    # 80. GPM – P/E (quality discount signal: good margins but cheap)
-    "rank(gross_profit / (revenue + 0.0001)) - rank(close / (eps + 0.0001))",
+    # 80. GPM minus valuation multiple (quality at a discount)
+    "rank(gross_income_total / (revenue + 0.0001)) - rank(close / (eps + 0.0001))",
  
-    # 81. B/M × E/P × ITR (value × earnings yield × efficiency — 3-factor)
-    "rank(book_value / (close * shares + 0.0001)) * rank(eps / (close + 0.0001)) * rank(revenue / (inventory + 0.0001))",
+    # 81. Three-way: B/M × E/P × ITR (value × earnings × efficiency)
+    "rank(bookvalue_ps / (close + 0.0001)) * rank(eps / (close + 0.0001)) * rank(inventory_turnover)",
  
     # 82. Earnings growth × GPM (growing earnings in high-margin companies)
-    "rank(ts_delta(net_income_adjusted, 252) / (abs(net_income_adjusted) + 0.0001)) * rank(gross_profit / (revenue + 0.0001))",
+    "rank(ts_delta(net_income_adjusted, 252) / (abs(net_income_adjusted) + 0.0001)) * rank(gross_income_total / (revenue + 0.0001))",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 10 — CROSS-SECTIONAL GROUP COMPOSITES (SUBINDUSTRY-Aware)
-    # Theory: Paper uses SUBINDUSTRY neutralization — group operators maximize
-    # what survives after neutralization. group_neutralize already does it.
+    # BLOCK 10  ▸  SUBINDUSTRY GROUP COMPOSITES
+    # Designed to survive SUBINDUSTRY neutralization
     # ═══════════════════════════════════════════════════════════════════════
  
-    # 83. Quality composite within subindustry
-    "group_neutralize(rank(eps / (close + 0.0001)) + rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+    # 83. Quality composite: E/P + ROA within subindustry
+    "group_neutralize(rank(eps / (close + 0.0001)) + rank(net_income_adjusted / (total_assets_reported_value + 0.0001)), subindustry)",
  
-    # 84. Value × quality within subindustry
-    "group_neutralize(rank(book_value / (close * shares + 0.0001)) * rank(gross_profit / (revenue + 0.0001)), subindustry)",
+    # 84. Value × quality: B/M × GPM within subindustry
+    "group_neutralize(rank(bookvalue_ps / (close + 0.0001)) * rank(gross_income_total / (revenue + 0.0001)), subindustry)",
  
-    # 85. Cash quality within subindustry
-    "group_neutralize(rank(operating_cf / (close * shares + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+    # 85. Cash × profitability within subindustry
+    "group_neutralize(rank(cash_flow_from_operations / (cap + 0.0001)) * rank(net_income_adjusted / (total_assets_reported_value + 0.0001)), subindustry)",
  
     # 86. Efficiency × profitability within subindustry
-    "group_neutralize(rank(revenue / (inventory + 0.0001)) * rank(net_income_adjusted / (total_assets + 0.0001)), subindustry)",
+    "group_neutralize(rank(inventory_turnover) * rank(net_income_adjusted / (total_assets_reported_value + 0.0001)), subindustry)",
  
-    # 87. Combined quality rank within group
-    "group_rank(net_income_adjusted / (total_assets + 0.0001) + gross_profit / (revenue + 0.0001), subindustry)",
+    # 87. Combined ROA + margin within subindustry
+    "group_rank(net_income_adjusted / (total_assets_reported_value + 0.0001) + net_income_adjusted / (revenue + 0.0001), subindustry)",
  
-    # 88. EPS group rank (earnings per share relative to peers)
-    "group_rank(eps / (close + 0.0001), subindustry)",
+    # 88. EPS group rank (earnings relative to peers)
+    "group_rank(eps, subindustry)",
  
     # 89. Cash flow yield group rank
-    "group_rank(operating_cf / (close * shares + 0.0001), subindustry)",
+    "group_rank(cash_flow_from_operations / (cap + 0.0001), subindustry)",
  
     # 90. B/M group rank
-    "group_rank(book_value / (close * shares + 0.0001), subindustry)",
+    "group_rank(bookvalue_ps / (close + 0.0001), subindustry)",
  
-    # 91. Earnings history rank within subindustry
+    # 91. EPS ts_rank within subindustry
     "group_neutralize(rank(ts_rank(eps, 252)), subindustry)",
  
-    # 92. Revenue yield within subindustry
-    "group_neutralize(-rank(close * shares / (revenue + 0.0001)), subindustry)",
+    # 92. Revenue yield + ROA composite within subindustry
+    "group_neutralize(rank(sales_ps / (close + 0.0001)) + rank(net_income_adjusted / (total_assets_reported_value + 0.0001)), subindustry)",
  
  
     # ═══════════════════════════════════════════════════════════════════════
-    # BLOCK 11 — TIME-SERIES RANKS ON FUNDAMENTALS (Relative to Own History)
-    # Theory: Fundamental improvement relative to own history = positive signal
-    # Paper: Gradient boosting captures non-linear temporal patterns in ratios
+    # BLOCK 11  ▸  TIME-SERIES RELATIVE FUNDAMENTALS
+    # Fundamental improvement relative to own history
     # ═══════════════════════════════════════════════════════════════════════
  
     # 93. ROA vs own trailing year
-    "rank(ts_rank(net_income_adjusted / (total_assets + 0.0001), 252))",
+    "rank(ts_rank(net_income_adjusted / (total_assets_reported_value + 0.0001), 252))",
  
-    # 94. Earnings yield vs own trailing year
+    # 94. Earnings yield vs own history
     "rank(ts_rank(eps / (close + 0.0001), 252))",
  
-    # 95. Earnings yield acceleration (change in ts_rank over 2 months)
+    # 95. Earnings yield acceleration (speed of improvement)
     "rank(ts_delta(ts_rank(eps, 252), 60))",
  
     # 96. GPM vs own history
-    "rank(ts_rank(gross_profit / (revenue + 0.0001), 252))",
+    "rank(ts_rank(gross_income_total / (revenue + 0.0001), 252))",
  
-    # 97. B/M vs own history
-    "rank(ts_rank(book_value / (close * shares + 0.0001), 252))",
+    # 97. B/M vs own history (currently cheap relative to own norm)
+    "-rank(ts_rank(close / (bookvalue_ps + 0.0001), 252))",
  
-    # 98. Cash flow yield vs own history
-    "rank(ts_rank(operating_cf / (close * shares + 0.0001), 252))",
+    # 98. CF yield vs own history
+    "rank(ts_rank(cash_flow_from_operations / (cap + 0.0001), 252))",
  
     # 99. ITR vs own trailing year
-    "rank(ts_rank(revenue / (inventory + 0.0001), 252))",
+    "rank(ts_rank(inventory_turnover, 252))",
  
     # 100. ROA acceleration: is profitability improvement speeding up?
-    "rank(ts_delta(ts_rank(net_income_adjusted / (total_assets + 0.0001), 252), 60))",
+    "rank(ts_delta(ts_rank(net_income_adjusted / (total_assets_reported_value + 0.0001), 252), 60))",
+ 
     ]
 
     alpha_list = [generate_alpha(x) for x in k]
 
-    simulate_alpha_list(s, alpha_list)
+    # Anti-burst settings: stagger each worker request to avoid 429 / DDOS-like spikes
+    simulate_alpha_list(
+        s,
+        alpha_list,
+        limit_of_concurrent_simulations=2,
+        pre_request_delay=0.4,
+        pre_request_jitter=0.6,
+    )
 
 
 if __name__ == "__main__":
