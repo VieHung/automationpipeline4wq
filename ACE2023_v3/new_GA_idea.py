@@ -163,7 +163,7 @@ SIM_KWARGS = dict(
 # Alpha list
 # ════════════════════════════════════════════════════════════════════════════
 ALPHA_LIST = [
-    "- (days_from_last_change(ts_arg_min(ts_delta(operating_income /operating_expense, 150), 100)))-(rank(ts_sum(kth_element(vec_avg(fnd6_newqeventv110_ivstq), 20, k=1)/ts_arg_min(return_assets, 20),20)) * (ts_mean(close-ts_delay(close, 1), 10)))",
+    "-(days_from_last_change(ts_arg_min(ts_delta(operating_income /operating_expense, 150), 100)))-(rank(ts_sum(kth_element(vec_avg(fnd6_newqeventv110_ivstq), 20, k=1)/ts_arg_min(return_assets, 20),20)) * (ts_mean(close-ts_delay(close, 1), 10)))",
 
     # Alpha 3: OK
     "add(-ts_mean(days_from_last_change(anl4_netprofit_median / fnd6_newa2v1300_oiadp), 252), group_rank(ts_arg_min(sign(fnd6_newa1v1300_gp),63),sector)+rank(sales/assets))-(rank(ts_arg_min(ts_corr(group_backfill(fnd6_newqv1300_mibnq,subindustry,120),fnd6_newa1v1300_epsfi,240),252)))",
